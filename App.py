@@ -3,6 +3,7 @@ import sqlite3
 from datetime import datetime, timedelta
 import pandas as pd
 import random
+import urllib.request
 
 # 遺忘曲線間隔設定 (0代表今天重測，接著是1天、2天...)
 INTERVALS = [0, 1, 2, 4, 7, 15, 30, 60]
@@ -21,7 +22,6 @@ def init_db():
             mistake_count INTEGER
         )
     ''')
-    # 自動升級資料庫：加入「最後忘記日期」與「圖片資料」欄位
     try:
         c.execute("ALTER TABLE vocab ADD COLUMN last_mistake_date DATE")
     except sqlite3.OperationalError:
@@ -50,7 +50,6 @@ def add_word(conn, word, meaning, image_data=None):
 def get_due_words(conn):
     c = conn.cursor()
     today = datetime.now().date()
-    # 取出時包含 image_data
     c.execute('SELECT id, word, meaning, level, mistake_count, image_data FROM vocab WHERE next_review_date <= ?', (today,))
     return c.fetchall()
 
@@ -90,7 +89,6 @@ def update_word_info(conn, word_id, new_word, new_meaning, new_image_data=None, 
         elif new_image_data:
             c.execute("UPDATE vocab SET word = ?, meaning = ?, image_data = ? WHERE id = ?", (new_word, new_meaning, new_image_data, word_id))
         else:
-            # 不更新圖片，只更新文字
             c.execute("UPDATE vocab SET word = ?, meaning = ? WHERE id = ?", (new_word, new_meaning, word_id))
         conn.commit()
         return True
@@ -102,7 +100,6 @@ def delete_word(conn, word_id):
     c.execute("DELETE FROM vocab WHERE id = ?", (word_id,))
     conn.commit()
 
-# --- 輔助功能：產生填空字串 ---
 def generate_masked_word(word):
     if len(word) <= 2:
         return " _ " * len(word)
@@ -112,11 +109,19 @@ def generate_masked_word(word):
     if not available_indices:
         available_indices = [0]
     hide_indices = random.sample(available_indices, min(hide_count, len(available_indices)))
-    
     for i in hide_indices:
         if word_list[i].isalpha():
             word_list[i] = "_"
     return " ".join(word_list)
+
+# --- 下載網路圖片的輔助函式 ---
+def fetch_image_from_url(url):
+    try:
+        req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
+        with urllib.request.urlopen(req, timeout=5) as response:
+            return response.read()
+    except Exception:
+        return None
 
 # --- 2. Streamlit UI 介面 ---
 st.set_page_config(page_title="遺忘曲線單字 App", page_icon="🧠", layout="centered")
@@ -133,11 +138,23 @@ with tab1:
     with st.form("add_word_form"):
         new_word = st.text_input("英文單字")
         new_meaning = st.text_input("中文意思")
-        uploaded_image = st.file_uploader("上傳提示圖片 (選填)", type=['png', 'jpg', 'jpeg'])
+        
+        st.write("🖼️ **選擇加入圖片的方式 (擇一即可)：**")
+        image_url = st.text_input("🔗 方式一：貼上網路圖片網址 (複製貼上)")
+        uploaded_image = st.file_uploader("📂 方式二：從 iPad 相簿/檔案上傳", type=['png', 'jpg', 'jpeg'])
         
         if st.form_submit_button("單筆加入"):
             if new_word and new_meaning:
-                img_bytes = uploaded_image.getvalue() if uploaded_image else None
+                img_bytes = None
+                
+                # 判斷圖片來源：上傳優先，網址次之
+                if uploaded_image:
+                    img_bytes = uploaded_image.getvalue()
+                elif image_url.strip():
+                    img_bytes = fetch_image_from_url(image_url.strip())
+                    if not img_bytes:
+                        st.warning("⚠️ 無法讀取該網址的圖片，已為您加入單字，但未包含圖片。")
+
                 if add_word(conn, new_word.strip().lower(), new_meaning.strip(), img_bytes):
                     st.success(f"已加入：{new_word}")
                 else:
@@ -172,16 +189,13 @@ with tab2:
         st.session_state.quiz_state = "question"
     else:
         st.write(f"還有 **{len(due_words)}** 個單字待測驗")
-        
         current_word = due_words[0]
-        # 解析包含 image_data 的變數
         word_id, word, meaning, level, mistakes, image_data = current_word
         
         if st.session_state.quiz_state == "question":
             st.markdown(f"<h4 style='text-align: center; color: #666;'>請問這個中文的英文是什麼？</h4>", unsafe_allow_html=True)
             st.markdown(f"<h1 style='text-align: center; color: #1E90FF; font-size: 3rem; margin-bottom: 10px;'>{meaning}</h1>", unsafe_allow_html=True)
             
-            # 如果有圖片，顯示出來
             if image_data:
                 col1, col2, col3 = st.columns([1, 2, 1])
                 with col2:
@@ -225,7 +239,6 @@ with tab2:
                     st.image(image_data, use_container_width=True)
                     
             st.info("💡 這個單字已經重新排入今日複習計畫，今天稍後會再次出現。")
-            
             if st.button("👉 點我繼續測驗下一個單字", use_container_width=True):
                 st.session_state.quiz_state = "question"
                 st.rerun()
@@ -270,12 +283,18 @@ with tab4:
                 edit_word = st.text_input("英文", value=selected_word)
                 edit_meaning = st.text_input("中文", value=selected_meaning)
                 
-                # 修改圖片的選項
-                edit_image = st.file_uploader("更換圖片 (若不換請留空)", type=['png', 'jpg', 'jpeg'])
+                st.write("🖼️ **更換圖片 (擇一，若不換請留空)：**")
+                edit_image_url = st.text_input("🔗 貼上新圖片網址")
+                edit_image_file = st.file_uploader("📂 上傳新圖片", type=['png', 'jpg', 'jpeg'])
                 clear_img_checkbox = st.checkbox("🗑️ 清除此單字原本的圖片")
                 
                 if st.form_submit_button("💾 儲存修改", use_container_width=True):
-                    img_bytes_to_update = edit_image.getvalue() if edit_image else None
+                    img_bytes_to_update = None
+                    if edit_image_file:
+                        img_bytes_to_update = edit_image_file.getvalue()
+                    elif edit_image_url.strip():
+                        img_bytes_to_update = fetch_image_from_url(edit_image_url.strip())
+                    
                     if update_word_info(conn, selected_id, edit_word.strip().lower(), edit_meaning.strip(), img_bytes_to_update, clear_img_checkbox):
                         st.success("修改成功！")
                         st.rerun()
