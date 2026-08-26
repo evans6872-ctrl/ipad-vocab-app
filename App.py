@@ -57,11 +57,36 @@ def update_word(conn, word_id, level, remembered, mistake_count):
         c.execute('UPDATE vocab SET level = ?, next_review_date = ? WHERE id = ?', 
                   (new_level, next_review, word_id))
     else:
-        new_level = 0 # 忘記了，間隔歸零（今天繼續測驗）
+        new_level = 0
         mistake_count += 1
         next_review = today + timedelta(days=INTERVALS[new_level])
         c.execute('UPDATE vocab SET level = ?, next_review_date = ?, mistake_count = ?, last_mistake_date = ? WHERE id = ?', 
                   (new_level, next_review, mistake_count, today, word_id))
+    conn.commit()
+
+# --- 新增的資料庫操作：總數、查詢、修改、刪除 ---
+def get_total_count(conn):
+    c = conn.cursor()
+    c.execute("SELECT COUNT(*) FROM vocab")
+    return c.fetchone()[0]
+
+def get_all_words(conn):
+    c = conn.cursor()
+    c.execute("SELECT id, word, meaning FROM vocab ORDER BY id DESC")
+    return c.fetchall()
+
+def update_word_info(conn, word_id, new_word, new_meaning):
+    c = conn.cursor()
+    try:
+        c.execute("UPDATE vocab SET word = ?, meaning = ? WHERE id = ?", (new_word, new_meaning, word_id))
+        conn.commit()
+        return True
+    except sqlite3.IntegrityError:
+        return False # 若修改後的英文單字與其他單字重複，則阻擋
+
+def delete_word(conn, word_id):
+    c = conn.cursor()
+    c.execute("DELETE FROM vocab WHERE id = ?", (word_id,))
     conn.commit()
 
 # --- 輔助功能：產生填空字串 ---
@@ -69,8 +94,7 @@ def generate_masked_word(word):
     if len(word) <= 2:
         return " _ " * len(word)
     word_list = list(word)
-    hide_count = max(1, len(word) // 2) # 隱藏一半的字母
-    # 盡量保留第一個字母，隨機挖空其他字母
+    hide_count = max(1, len(word) // 2)
     available_indices = list(range(1, len(word)))
     if not available_indices:
         available_indices = [0]
@@ -87,7 +111,8 @@ st.set_page_config(page_title="遺忘曲線單字 App", page_icon="🧠", layout
 conn = init_db()
 st.title("🧠 遺忘曲線單字記憶系統")
 
-tab1, tab2, tab3 = st.tabs(["📝 新增單字", "🎯 今日測驗", "📊 弱點分析"])
+# 增加第四個標籤頁
+tab1, tab2, tab3, tab4 = st.tabs(["📝 新增單字", "🎯 今日測驗", "📊 弱點分析", "🗂️ 總字庫管理"])
 
 # --- 標籤頁 1: 新增單字 ---
 with tab1:
@@ -123,26 +148,23 @@ with tab2:
     st.header("今日需複習單字")
     due_words = get_due_words(conn)
     
-    # 初始化測驗狀態
     if 'quiz_state' not in st.session_state:
         st.session_state.quiz_state = "question"
     
     if not due_words:
         st.info("太棒了！今天的任務全數完成囉！🎉")
-        st.session_state.quiz_state = "question" # 重置狀態
+        st.session_state.quiz_state = "question"
     else:
         st.write(f"還有 **{len(due_words)}** 個單字待測驗")
         
         current_word = due_words[0]
         word_id, word, meaning, level, mistakes = current_word
         
-        # 狀態一：正在作答
         if st.session_state.quiz_state == "question":
             st.markdown(f"<h4 style='text-align: center; color: #666;'>請問這個中文的英文是什麼？</h4>", unsafe_allow_html=True)
             st.markdown(f"<h1 style='text-align: center; color: #1E90FF; font-size: 3rem; margin-bottom: 30px;'>{meaning}</h1>", unsafe_allow_html=True)
             
-            # 選擇測驗模式
-            quiz_mode = st.radio("選擇測驗模式：", ["⌨️ 完整拼寫 (支援 Apple Pencil 隨手寫)", "🧩 字母填空"], horizontal=True)
+            quiz_mode = st.radio("選擇測驗模式：", ["⌨️ 完整拼寫 (支援 Apple Pencil)", "🧩 字母填空"], horizontal=True)
             
             if quiz_mode == "🧩 字母填空":
                 if 'masked_word' not in st.session_state or st.session_state.get('current_word_id') != word_id:
@@ -160,7 +182,6 @@ with tab2:
                         update_word(conn, word_id, level, True, mistakes)
                         st.rerun()
                     else:
-                        # 答錯了，進入看答案狀態
                         st.session_state.quiz_state = "show_wrong_answer"
                         update_word(conn, word_id, level, False, mistakes)
                         st.rerun()
@@ -170,7 +191,6 @@ with tab2:
                     update_word(conn, word_id, level, False, mistakes)
                     st.rerun()
 
-        # 狀態二：答錯或不會拼，顯示正確答案
         elif st.session_state.quiz_state == "show_wrong_answer":
             st.error("❌ 答錯了或忘記了！")
             st.markdown(f"<h4 style='text-align: center;'>「{meaning}」的正確答案是：</h4>", unsafe_allow_html=True)
@@ -183,14 +203,13 @@ with tab2:
 
 # --- 標籤頁 3: 弱點分析 ---
 with tab3:
-    st.header("你的單字庫與弱點追蹤")
+    st.header("弱點追蹤")
     df = pd.read_sql_query('''
         SELECT 
             word AS 英文單字, 
             meaning AS 中文意思, 
             mistake_count AS 累積忘記次數,
-            last_mistake_date AS 最近卡關日期,
-            next_review_date AS 下次複習日
+            last_mistake_date AS 最近卡關日期
         FROM vocab 
         ORDER BY mistake_count DESC, last_mistake_date DESC
     ''', conn)
@@ -199,3 +218,50 @@ with tab3:
         st.dataframe(df, use_container_width=True)
     else:
         st.write("目前字庫還是空的。")
+
+# --- 標籤頁 4: 總字庫管理 ---
+with tab4:
+    st.header("🗂️ 總字庫與管理")
+    
+    total_words = get_total_count(conn)
+    st.info(f"📚 目前資料庫中共有 **{total_words}** 個單字")
+    
+    st.subheader("✏️ 編輯或刪除單字")
+    all_words_list = get_all_words(conn) # 取得 [(id, word, meaning), ...] 格式
+    
+    if all_words_list:
+        # 建立下拉選單的選項字典，格式為 "英文 (中文)" 以方便辨識
+        word_options = {f"{w[1]} ({w[2]})": w for w in all_words_list}
+        selected_option = st.selectbox("請尋找並選擇要處理的單字：", options=list(word_options.keys()))
+        
+        # 取得被選中單字的詳細資料
+        selected_id, selected_word, selected_meaning = word_options[selected_option]
+        
+        col1, col2 = st.columns(2)
+        with col1:
+            with st.form("edit_form"):
+                st.write("📝 修改單字內容")
+                edit_word = st.text_input("英文", value=selected_word)
+                edit_meaning = st.text_input("中文", value=selected_meaning)
+                if st.form_submit_button("💾 儲存修改", use_container_width=True):
+                    if update_word_info(conn, selected_id, edit_word.strip().lower(), edit_meaning.strip()):
+                        st.success("修改成功！")
+                        st.rerun()
+                    else:
+                        st.error("修改失敗（可能是修改後的英文已存在於字庫中）")
+        with col2:
+            with st.form("delete_form"):
+                st.write("🗑️ 刪除此單字")
+                st.warning("⚠️ 刪除後將連同記憶紀錄一起清除，無法復原。")
+                # 為了排版對齊，加入一個空的佔位符
+                st.text_input("確認", value="勾選下方按鈕刪除", disabled=True, label_visibility="hidden")
+                if st.form_submit_button("🚨 確認永久刪除", use_container_width=True):
+                    delete_word(conn, selected_id)
+                    st.success("刪除成功！")
+                    st.rerun()
+                    
+    st.divider()
+    st.write("📋 **所有單字預覽**")
+    df_all = pd.read_sql_query('SELECT id AS 編號, word AS 英文, meaning AS 中文, level AS 記憶階段, next_review_date AS 下次複習日 FROM vocab ORDER BY id DESC', conn)
+    if not df_all.empty:
+        st.dataframe(df_all, use_container_width=True, hide_index=True)
