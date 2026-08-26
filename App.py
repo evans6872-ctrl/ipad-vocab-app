@@ -114,7 +114,6 @@ def generate_masked_word(word):
             word_list[i] = "_"
     return " ".join(word_list)
 
-# --- 下載網路圖片的輔助函式 ---
 def fetch_image_from_url(url):
     try:
         req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
@@ -134,20 +133,20 @@ tab1, tab2, tab3, tab4 = st.tabs(["📝 新增單字", "🎯 今日測驗", "�
 # --- 標籤頁 1: 新增單字 ---
 with tab1:
     st.header("新增單字庫")
-    st.subheader("🔹 單筆輸入 (支援圖片)")
+    st.subheader("🔹 單筆輸入 (支援電腦複製貼上)")
     with st.form("add_word_form"):
         new_word = st.text_input("英文單字")
         new_meaning = st.text_input("中文意思")
         
-        st.write("🖼️ **選擇加入圖片的方式 (擇一即可)：**")
-        image_url = st.text_input("🔗 方式一：貼上網路圖片網址 (複製貼上)")
-        uploaded_image = st.file_uploader("📂 方式二：從 iPad 相簿/檔案上傳", type=['png', 'jpg', 'jpeg'])
+        st.write("🖼️ **加入圖片方式 (電腦用戶可直接 Ctrl+V)：**")
+        image_url = st.text_input("🔗 方式一：貼上網路圖片網址")
+        # 針對電腦版操作優化了提示文字
+        uploaded_image = st.file_uploader("📂 方式二：點擊此處並按 Ctrl+V 貼上截圖，或選擇檔案", type=['png', 'jpg', 'jpeg'])
         
         if st.form_submit_button("單筆加入"):
             if new_word and new_meaning:
                 img_bytes = None
                 
-                # 判斷圖片來源：上傳優先，網址次之
                 if uploaded_image:
                     img_bytes = uploaded_image.getvalue()
                 elif image_url.strip():
@@ -285,7 +284,7 @@ with tab4:
                 
                 st.write("🖼️ **更換圖片 (擇一，若不換請留空)：**")
                 edit_image_url = st.text_input("🔗 貼上新圖片網址")
-                edit_image_file = st.file_uploader("📂 上傳新圖片", type=['png', 'jpg', 'jpeg'])
+                edit_image_file = st.file_uploader("📂 點擊此處按 Ctrl+V 貼上新圖片", type=['png', 'jpg', 'jpeg'])
                 clear_img_checkbox = st.checkbox("🗑️ 清除此單字原本的圖片")
                 
                 if st.form_submit_button("💾 儲存修改", use_container_width=True):
