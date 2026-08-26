@@ -1,3 +1,6 @@
+Plaintext
+pandas
+[requirements.txt](https://github.com/user-attachments/files/31471926/requirements.txt)
 [App.py](https://github.com/user-attachments/files/31471709/App.py)
 # ipad-vocab-app
 English for yuyu
