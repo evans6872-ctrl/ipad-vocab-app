@@ -2,7 +2,6 @@ import streamlit as st
 import psycopg2
 from datetime import datetime, timedelta
 import pandas as pd
-import random
 import urllib.request
 
 # 遺忘曲線間隔設定 (0代表今天重測，接著是1天、2天...)
@@ -60,7 +59,8 @@ def get_due_words():
 def get_weak_words():
     conn = get_db_connection()
     c = conn.cursor()
-    c.execute('SELECT id, word, meaning, level, mistake_count, image_data FROM vocab WHERE mistake_count > 0 ORDER BY mistake_count DESC, last_mistake_date DESC')
+    # 取出忘記次數大於0的單字，以次數最多者優先排列
+    c.execute('SELECT id, word, meaning, level, mistake_count, image_data FROM vocab WHERE mistake_count > 0 ORDER BY mistake_count DESC')
     res = c.fetchall()
     conn.close()
     return res
@@ -73,7 +73,7 @@ def get_all_words_for_practice():
     conn.close()
     return res
 
-def update_word(word_id, level, remembered, mistake_count):
+def update_word(word_id, level, remembered, mistake_count, clear_weakness=False):
     conn = get_db_connection()
     c = conn.cursor()
     today = datetime.now().date()
@@ -81,8 +81,13 @@ def update_word(word_id, level, remembered, mistake_count):
     if remembered:
         new_level = min(level + 1, len(INTERVALS) - 1)
         next_review = today + timedelta(days=INTERVALS[new_level])
-        c.execute('UPDATE vocab SET level = %s, next_review_date = %s WHERE id = %s', 
-                  (new_level, next_review, word_id))
+        if clear_weakness:
+            # 弱點強化模式下答對，清空忘記次數，讓單字正式脫離弱點區！
+            c.execute('UPDATE vocab SET level = %s, next_review_date = %s, mistake_count = 0 WHERE id = %s', 
+                      (new_level, next_review, word_id))
+        else:
+            c.execute('UPDATE vocab SET level = %s, next_review_date = %s WHERE id = %s', 
+                      (new_level, next_review, word_id))
     else:
         new_level = 0
         mistake_count += 1
@@ -224,6 +229,19 @@ with tab2:
     st.header("開始練習")
     practice_mode = st.radio("選擇練習模式：", ["📅 每日複習 (依計畫)", "🏋️ 強化弱點 (忘記次數>0)", "🔍 自訂單字練習"], horizontal=True)
     
+    # 建立測驗狀態記憶區
+    if 'quiz_state' not in st.session_state:
+        st.session_state.quiz_state = 'question'
+    if 'custom_index' not in st.session_state:
+        st.session_state.custom_index = 0
+    if 'queue_index' not in st.session_state:
+        st.session_state.queue_index = 0
+    if 'last_custom_selection' not in st.session_state:
+        st.session_state.last_custom_selection = []
+    if 'q_key' not in st.session_state:
+        st.session_state.q_key = 0
+
+    # 取得單字庫清單
     if practice_mode == "📅 每日複習 (依計畫)":
         words_list = get_due_words()
     elif practice_mode == "🏋️ 強化弱點 (忘記次數>0)":
@@ -232,66 +250,103 @@ with tab2:
         all_words = get_all_words_for_practice()
         if all_words:
             word_options = {f"{w[1]} ({w[2]})": w for w in all_words}
-            selected_key = st.selectbox("請尋找並選擇要練習的單字：", list(word_options.keys()))
-            words_list = [word_options[selected_key]]
+            selected_keys = st.multiselect("請選擇要練習的單字（可多選）：", list(word_options.keys()))
+            
+            # 若選取的內容改變，重置自訂進度
+            if selected_keys != st.session_state.last_custom_selection:
+                st.session_state.custom_index = 0
+                st.session_state.last_custom_selection = selected_keys
+                st.session_state.quiz_state = 'question'
+                
+            words_list = [word_options[k] for k in selected_keys]
         else:
             words_list = []
 
-    if 'quiz_state' not in st.session_state:
-        st.session_state.quiz_state = 'question'
-    if 'current_word_id' not in st.session_state:
-        st.session_state.current_word_id = None
-
-    if not words_list:
-        st.info("太棒了！目前這個模式下沒有待測驗的單字。🎉")
-        st.session_state.quiz_state = 'question'
+    # 決定當前要測驗的單字
+    current_word = None
+    if practice_mode == "🔍 自訂單字練習":
+        if st.session_state.custom_index < len(words_list):
+            current_word = words_list[st.session_state.custom_index]
+        elif len(words_list) > 0:
+            st.success("🎉 您選取的自訂單字已全部練習完畢！您可以重新選擇單字繼續。")
     else:
-        current_word = words_list[0]
+        if words_list:
+            # 確保 queue_index 不會超出當前單字清單的長度（讓錯誤單字可以循環重出）
+            if st.session_state.queue_index >= len(words_list):
+                st.session_state.queue_index = 0
+            current_word = words_list[st.session_state.queue_index]
+        else:
+            st.success("🎉 太棒了！目前這個模式下沒有待測驗的單字。")
+            st.session_state.quiz_state = 'question'
+
+    # 開始測驗介面
+    if current_word:
         word_id, word, meaning, level, mistakes, image_data = current_word
         
-        if st.session_state.current_word_id != word_id and st.session_state.quiz_state != 'wrong_feedback':
-            st.session_state.quiz_state = 'question'
-            st.session_state.current_word_id = word_id
-
         if st.session_state.quiz_state == 'question':
             if practice_mode != "🔍 自訂單字練習":
-                st.write(f"待複習數量：**{len(words_list)}**")
-            st.markdown(f"<h2 style='text-align: center; color: #1E90FF; font-size: 3.5rem;'>{word}</h2>", unsafe_allow_html=True)
+                st.write(f"待測驗數量：**{len(words_list)}**")
+                
+            st.markdown(f"<h4 style='text-align: center; color: #666;'>請輸入以下中文對應的英文：</h4>", unsafe_allow_html=True)
+            st.markdown(f"<h1 style='text-align: center; color: #1E90FF; font-size: 3rem;'>{meaning}</h1>", unsafe_allow_html=True)
             
-            if st.button("👁️ 顯示答案", use_container_width=True):
-                st.session_state.quiz_state = 'show_answer'
-                st.rerun()
-
-        elif st.session_state.quiz_state == 'show_answer':
-            st.markdown(f"<h2 style='text-align: center; color: #1E90FF; font-size: 3.5rem;'>{word}</h2>", unsafe_allow_html=True)
-            st.success(f"**中文意思:** {meaning}")
             if image_data:
                 col1, col2, col3 = st.columns([1, 2, 1])
                 with col2:
                     st.image(bytes(image_data), use_container_width=True)
             
-            col1, col2 = st.columns(2)
-            with col1:
-                if st.button("❌ 忘記了 (重置記憶)", use_container_width=True):
-                    update_word(word_id, level, False, mistakes)
+            # 使用表單包裝，在電腦或 iPad 鍵盤上按下 Enter 就能直接送出答案
+            with st.form(key=f"quiz_form_{st.session_state.q_key}"):
+                user_ans = st.text_input("📝 請在此輸入英文拼寫：")
+                
+                col1, col2 = st.columns(2)
+                with col1:
+                    submit_btn = st.form_submit_button("✅ 送出答案", use_container_width=True)
+                with col2:
+                    give_up_btn = st.form_submit_button("❌ 不會拼 (看答案)", use_container_width=True)
+                    
+                if submit_btn:
+                    if user_ans.strip().lower() == word.lower():
+                        st.toast("答對了！", icon="🎉")
+                        # 答對時的處理
+                        is_weakness = (practice_mode == "🏋️ 強化弱點 (忘記次數>0)")
+                        update_word(word_id, level, True, mistakes, clear_weakness=is_weakness)
+                        
+                        if practice_mode == "🔍 自訂單字練習":
+                            st.session_state.custom_index += 1
+                        # 注意：每日或弱點模式下，答對的單字會直接從 words_list 消失，所以 queue_index 不用加 1，下一個單字會自動遞補上來
+                        
+                        st.session_state.q_key += 1
+                        st.session_state.quiz_state = 'question'
+                        st.rerun()
+                    else:
+                        st.session_state.quiz_state = 'wrong_feedback'
+                        update_word(word_id, level, False, mistakes)
+                        st.rerun()
+                        
+                if give_up_btn:
                     st.session_state.quiz_state = 'wrong_feedback'
+                    update_word(word_id, level, False, mistakes)
                     st.rerun()
-            with col2:
-                if st.button("✅ 記得了 (進入下階段)", use_container_width=True):
-                    update_word(word_id, level, True, mistakes)
-                    st.session_state.quiz_state = 'question'
-                    st.rerun()
-
+                    
         elif st.session_state.quiz_state == 'wrong_feedback':
-            st.error("❌ 剛剛不小心答錯囉！請在此稍作停留，再次確認這個單字的正確意思：")
-            st.markdown(f"<h2 style='text-align: center; color: #FF4B4B; font-size: 3.5rem;'>{word}</h2>", unsafe_allow_html=True)
-            st.info(f"**中文意思:** {meaning}")
+            st.error("❌ 拼錯了或是忘記囉！請看正確答案並加深記憶：")
+            st.markdown(f"<h4 style='text-align: center;'>「{meaning}」的正確英文是：</h4>", unsafe_allow_html=True)
+            st.markdown(f"<h1 style='text-align: center; color: #FF4B4B; font-size: 3.5rem; letter-spacing: 2px;'>{word}</h1>", unsafe_allow_html=True)
+            
             if image_data:
                 col1, col2, col3 = st.columns([1, 2, 1])
                 with col2:
                     st.image(bytes(image_data), use_container_width=True)
             
             if st.button("👉 我記住了，前往下一題", use_container_width=True):
+                if practice_mode == "🔍 自訂單字練習":
+                    st.session_state.custom_index += 1
+                else:
+                    # 答錯時 queue_index 往後加 1，把剛剛答錯的字排到後面去，稍後會循環重出
+                    st.session_state.queue_index += 1
+                    
+                st.session_state.q_key += 1
                 st.session_state.quiz_state = 'question'
                 st.rerun()
 
@@ -341,10 +396,11 @@ with tab4:
                         st.success("修改成功！")
                         st.rerun()
                     else:
-                        st.error("修改失敗")
+                        st.error("修改失敗（可能是修改後的英文已存在於字庫中）")
         with col2:
             with st.form("delete_form"):
                 st.write("🗑️ 刪除此單字")
+                st.warning("⚠️ 刪除後無法復原。")
                 st.text_input("確認", value="勾選下方按鈕刪除", disabled=True, label_visibility="hidden")
                 if st.form_submit_button("🚨 確認永久刪除", use_container_width=True):
                     delete_word(selected_id)
