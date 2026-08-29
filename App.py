@@ -59,7 +59,6 @@ def get_due_words():
 def get_weak_words():
     conn = get_db_connection()
     c = conn.cursor()
-    # 取出忘記次數大於0的單字，以次數最多者優先排列
     c.execute('SELECT id, word, meaning, level, mistake_count, image_data FROM vocab WHERE mistake_count > 0 ORDER BY mistake_count DESC')
     res = c.fetchall()
     conn.close()
@@ -82,7 +81,6 @@ def update_word(word_id, level, remembered, mistake_count, clear_weakness=False)
         new_level = min(level + 1, len(INTERVALS) - 1)
         next_review = today + timedelta(days=INTERVALS[new_level])
         if clear_weakness:
-            # 弱點強化模式下答對，清空忘記次數，讓單字正式脫離弱點區！
             c.execute('UPDATE vocab SET level = %s, next_review_date = %s, mistake_count = 0 WHERE id = %s', 
                       (new_level, next_review, word_id))
         else:
@@ -229,7 +227,6 @@ with tab2:
     st.header("開始練習")
     practice_mode = st.radio("選擇練習模式：", ["📅 每日複習 (依計畫)", "🏋️ 強化弱點 (忘記次數>0)", "🔍 自訂單字練習"], horizontal=True)
     
-    # 建立測驗狀態記憶區
     if 'quiz_state' not in st.session_state:
         st.session_state.quiz_state = 'question'
     if 'custom_index' not in st.session_state:
@@ -241,7 +238,6 @@ with tab2:
     if 'q_key' not in st.session_state:
         st.session_state.q_key = 0
 
-    # 取得單字庫清單
     if practice_mode == "📅 每日複習 (依計畫)":
         words_list = get_due_words()
     elif practice_mode == "🏋️ 強化弱點 (忘記次數>0)":
@@ -250,9 +246,15 @@ with tab2:
         all_words = get_all_words_for_practice()
         if all_words:
             word_options = {f"{w[1]} ({w[2]})": w for w in all_words}
-            selected_keys = st.multiselect("請選擇要練習的單字（可多選）：", list(word_options.keys()))
             
-            # 若選取的內容改變，重置自訂進度
+            # ⭐️ 加入折疊區塊：把佔空間的選單收起來！
+            with st.expander(f"📂 點擊展開 / 收合單字選單 (已選取 {len(st.session_state.last_custom_selection)} 個字)"):
+                selected_keys = st.multiselect(
+                    "請選擇要練習的單字（可多選）：", 
+                    list(word_options.keys()), 
+                    default=st.session_state.last_custom_selection
+                )
+            
             if selected_keys != st.session_state.last_custom_selection:
                 st.session_state.custom_index = 0
                 st.session_state.last_custom_selection = selected_keys
@@ -262,16 +264,14 @@ with tab2:
         else:
             words_list = []
 
-    # 決定當前要測驗的單字
     current_word = None
     if practice_mode == "🔍 自訂單字練習":
         if st.session_state.custom_index < len(words_list):
             current_word = words_list[st.session_state.custom_index]
         elif len(words_list) > 0:
-            st.success("🎉 您選取的自訂單字已全部練習完畢！您可以重新選擇單字繼續。")
+            st.success("🎉 您選取的自訂單字已全部練習完畢！您可以點擊上方的「📂 展開選單」重新選擇單字繼續。")
     else:
         if words_list:
-            # 確保 queue_index 不會超出當前單字清單的長度（讓錯誤單字可以循環重出）
             if st.session_state.queue_index >= len(words_list):
                 st.session_state.queue_index = 0
             current_word = words_list[st.session_state.queue_index]
@@ -279,7 +279,6 @@ with tab2:
             st.success("🎉 太棒了！目前這個模式下沒有待測驗的單字。")
             st.session_state.quiz_state = 'question'
 
-    # 開始測驗介面
     if current_word:
         word_id, word, meaning, level, mistakes, image_data = current_word
         
@@ -295,7 +294,6 @@ with tab2:
                 with col2:
                     st.image(bytes(image_data), use_container_width=True)
             
-            # 使用表單包裝，在電腦或 iPad 鍵盤上按下 Enter 就能直接送出答案
             with st.form(key=f"quiz_form_{st.session_state.q_key}"):
                 user_ans = st.text_input("📝 請在此輸入英文拼寫：")
                 
@@ -308,13 +306,11 @@ with tab2:
                 if submit_btn:
                     if user_ans.strip().lower() == word.lower():
                         st.toast("答對了！", icon="🎉")
-                        # 答對時的處理
                         is_weakness = (practice_mode == "🏋️ 強化弱點 (忘記次數>0)")
                         update_word(word_id, level, True, mistakes, clear_weakness=is_weakness)
                         
                         if practice_mode == "🔍 自訂單字練習":
                             st.session_state.custom_index += 1
-                        # 注意：每日或弱點模式下，答對的單字會直接從 words_list 消失，所以 queue_index 不用加 1，下一個單字會自動遞補上來
                         
                         st.session_state.q_key += 1
                         st.session_state.quiz_state = 'question'
@@ -343,7 +339,6 @@ with tab2:
                 if practice_mode == "🔍 自訂單字練習":
                     st.session_state.custom_index += 1
                 else:
-                    # 答錯時 queue_index 往後加 1，把剛剛答錯的字排到後面去，稍後會循環重出
                     st.session_state.queue_index += 1
                     
                 st.session_state.q_key += 1
