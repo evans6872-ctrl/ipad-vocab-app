@@ -1,5 +1,5 @@
 import streamlit as st
-import sqlite3
+import psycopg2
 from datetime import datetime, timedelta
 import pandas as pd
 import random
@@ -8,97 +8,144 @@ import urllib.request
 # 遺忘曲線間隔設定 (0代表今天重測，接著是1天、2天...)
 INTERVALS = [0, 1, 2, 4, 7, 15, 30, 60]
 
-# --- 1. 資料庫初始化與操作 ---
+# --- 1. 雲端資料庫連線與操作 ---
+def get_db_connection():
+    # 透過 Streamlit Secrets 讀取您剛剛設定的資料庫網址
+    return psycopg2.connect(st.secrets["DATABASE_URL"])
+
 def init_db():
-    conn = sqlite3.connect('vocab.db')
+    conn = get_db_connection()
     c = conn.cursor()
+    # PostgreSQL 語法：AUTOINCREMENT 改為 SERIAL，BLOB 改為 BYTEA
     c.execute('''
         CREATE TABLE IF NOT EXISTS vocab (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            id SERIAL PRIMARY KEY,
             word TEXT UNIQUE,
             meaning TEXT,
             level INTEGER,
             next_review_date DATE,
-            mistake_count INTEGER
+            mistake_count INTEGER,
+            last_mistake_date DATE,
+            image_data BYTEA
         )
     ''')
-    try:
-        c.execute("ALTER TABLE vocab ADD COLUMN last_mistake_date DATE")
-    except sqlite3.OperationalError:
-        pass 
-    try:
-        c.execute("ALTER TABLE vocab ADD COLUMN image_data BLOB")
-    except sqlite3.OperationalError:
-        pass
-        
     conn.commit()
-    return conn
+    conn.close()
 
-def add_word(conn, word, meaning, image_data=None):
+def add_word(word, meaning, image_data=None):
+    conn = get_db_connection()
     c = conn.cursor()
     today = datetime.now().date()
     try:
+        img_val = psycopg2.Binary(image_data) if image_data else None
+        # PostgreSQL 使用 %s 作為變數佔位符
         c.execute('''
             INSERT INTO vocab (word, meaning, level, next_review_date, mistake_count, image_data)
-            VALUES (?, ?, 0, ?, 0, ?)
-        ''', (word, meaning, today, image_data))
+            VALUES (%s, %s, 0, %s, 0, %s)
+        ''', (word, meaning, today, img_val))
         conn.commit()
         return True
-    except sqlite3.IntegrityError:
+    except psycopg2.IntegrityError:
+        conn.rollback()
         return False
+    finally:
+        conn.close()
 
-def get_due_words(conn):
+def get_due_words():
+    conn = get_db_connection()
     c = conn.cursor()
     today = datetime.now().date()
-    c.execute('SELECT id, word, meaning, level, mistake_count, image_data FROM vocab WHERE next_review_date <= ?', (today,))
-    return c.fetchall()
+    c.execute('SELECT id, word, meaning, level, mistake_count, image_data FROM vocab WHERE next_review_date <= %s ORDER BY next_review_date ASC', (today,))
+    res = c.fetchall()
+    conn.close()
+    return res
 
-def update_word(conn, word_id, level, remembered, mistake_count):
+def update_word(word_id, level, remembered, mistake_count):
+    conn = get_db_connection()
     c = conn.cursor()
     today = datetime.now().date()
     
     if remembered:
         new_level = min(level + 1, len(INTERVALS) - 1)
         next_review = today + timedelta(days=INTERVALS[new_level])
-        c.execute('UPDATE vocab SET level = ?, next_review_date = ? WHERE id = ?', 
+        c.execute('UPDATE vocab SET level = %s, next_review_date = %s WHERE id = %s', 
                   (new_level, next_review, word_id))
     else:
         new_level = 0
         mistake_count += 1
         next_review = today + timedelta(days=INTERVALS[new_level])
-        c.execute('UPDATE vocab SET level = ?, next_review_date = ?, mistake_count = ?, last_mistake_date = ? WHERE id = ?', 
+        c.execute('UPDATE vocab SET level = %s, next_review_date = %s, mistake_count = %s, last_mistake_date = %s WHERE id = %s', 
                   (new_level, next_review, mistake_count, today, word_id))
     conn.commit()
+    conn.close()
 
-# --- 新增的資料庫操作：總數、查詢、修改、刪除 ---
-def get_total_count(conn):
+def get_total_count():
+    conn = get_db_connection()
     c = conn.cursor()
     c.execute("SELECT COUNT(*) FROM vocab")
-    return c.fetchone()[0]
+    res = c.fetchone()[0]
+    conn.close()
+    return res
 
-def get_all_words(conn):
+def get_all_words():
+    conn = get_db_connection()
     c = conn.cursor()
     c.execute("SELECT id, word, meaning FROM vocab ORDER BY id DESC")
-    return c.fetchall()
+    res = c.fetchall()
+    conn.close()
+    return res
 
-def update_word_info(conn, word_id, new_word, new_meaning, new_image_data=None, clear_image=False):
+def update_word_info(word_id, new_word, new_meaning, new_image_data=None, clear_image=False):
+    conn = get_db_connection()
     c = conn.cursor()
     try:
         if clear_image:
-            c.execute("UPDATE vocab SET word = ?, meaning = ?, image_data = NULL WHERE id = ?", (new_word, new_meaning, word_id))
+            c.execute("UPDATE vocab SET word = %s, meaning = %s, image_data = NULL WHERE id = %s", (new_word, new_meaning, word_id))
         elif new_image_data:
-            c.execute("UPDATE vocab SET word = ?, meaning = ?, image_data = ? WHERE id = ?", (new_word, new_meaning, new_image_data, word_id))
+            img_val = psycopg2.Binary(new_image_data)
+            c.execute("UPDATE vocab SET word = %s, meaning = %s, image_data = %s WHERE id = %s", (new_word, new_meaning, img_val, word_id))
         else:
-            c.execute("UPDATE vocab SET word = ?, meaning = ? WHERE id = ?", (new_word, new_meaning, word_id))
+            c.execute("UPDATE vocab SET word = %s, meaning = %s WHERE id = %s", (new_word, new_meaning, word_id))
         conn.commit()
         return True
-    except sqlite3.IntegrityError:
-        return False 
+    except psycopg2.IntegrityError:
+        conn.rollback()
+        return False
+    finally:
+        conn.close()
 
-def delete_word(conn, word_id):
+def delete_word(word_id):
+    conn = get_db_connection()
     c = conn.cursor()
-    c.execute("DELETE FROM vocab WHERE id = ?", (word_id,))
+    c.execute("DELETE FROM vocab WHERE id = %s", (word_id,))
     conn.commit()
+    conn.close()
+    
+def get_weakness_df():
+    conn = get_db_connection()
+    c = conn.cursor()
+    c.execute('''
+        SELECT 
+            word AS 英文單字, 
+            meaning AS 中文意思, 
+            mistake_count AS 累積忘記次數,
+            last_mistake_date AS 最近卡關日期
+        FROM vocab 
+        ORDER BY mistake_count DESC, last_mistake_date DESC
+    ''')
+    rows = c.fetchall()
+    cols = [desc[0] for desc in c.description]
+    conn.close()
+    return pd.DataFrame(rows, columns=cols)
+    
+def get_all_df():
+    conn = get_db_connection()
+    c = conn.cursor()
+    c.execute('SELECT id AS 編號, word AS 英文, meaning AS 中文, level AS 記憶階段 FROM vocab ORDER BY id DESC')
+    rows = c.fetchall()
+    cols = [desc[0] for desc in c.description]
+    conn.close()
+    return pd.DataFrame(rows, columns=cols)
 
 def generate_masked_word(word):
     if len(word) <= 2:
@@ -125,7 +172,9 @@ def fetch_image_from_url(url):
 # --- 2. Streamlit UI 介面 ---
 st.set_page_config(page_title="遺忘曲線單字 App", page_icon="🧠", layout="centered")
 
-conn = init_db()
+# 啟動時自動建立雲端資料表
+init_db()
+
 st.title("🧠 遺忘曲線單字記憶系統")
 
 tab1, tab2, tab3, tab4 = st.tabs(["📝 新增單字", "🎯 今日測驗", "📊 弱點分析", "🗂️ 總字庫管理"])
@@ -140,7 +189,6 @@ with tab1:
         
         st.write("🖼️ **加入圖片方式 (電腦用戶可直接 Ctrl+V)：**")
         image_url = st.text_input("🔗 方式一：貼上網路圖片網址")
-        # 針對電腦版操作優化了提示文字
         uploaded_image = st.file_uploader("📂 方式二：點擊此處並按 Ctrl+V 貼上截圖，或選擇檔案", type=['png', 'jpg', 'jpeg'])
         
         if st.form_submit_button("單筆加入"):
@@ -154,7 +202,7 @@ with tab1:
                     if not img_bytes:
                         st.warning("⚠️ 無法讀取該網址的圖片，已為您加入單字，但未包含圖片。")
 
-                if add_word(conn, new_word.strip().lower(), new_meaning.strip(), img_bytes):
+                if add_word(new_word.strip().lower(), new_meaning.strip(), img_bytes):
                     st.success(f"已加入：{new_word}")
                 else:
                     st.error("單字已在字庫中！")
@@ -169,7 +217,7 @@ with tab1:
                 delimiter = ',' if ',' in line else '，'
                 parts = line.split(delimiter)
                 if len(parts) >= 2:
-                    if add_word(conn, parts[0].strip().lower(), parts[1].strip()):
+                    if add_word(parts[0].strip().lower(), parts[1].strip()):
                         success_count += 1
                     else:
                         fail_count += 1
@@ -178,7 +226,7 @@ with tab1:
 # --- 標籤頁 2: 今日測驗 ---
 with tab2:
     st.header("今日需複習單字")
-    due_words = get_due_words(conn)
+    due_words = get_due_words()
     
     if 'quiz_state' not in st.session_state:
         st.session_state.quiz_state = "question"
@@ -198,7 +246,8 @@ with tab2:
             if image_data:
                 col1, col2, col3 = st.columns([1, 2, 1])
                 with col2:
-                    st.image(image_data, use_container_width=True)
+                    # 轉換資料庫儲存的二進制格式讓 Streamlit 正確顯示圖片
+                    st.image(bytes(image_data), use_container_width=True)
             
             quiz_mode = st.radio("選擇測驗模式：", ["⌨️ 完整拼寫 (支援 Apple Pencil)", "🧩 字母填空"], horizontal=True)
             
@@ -215,16 +264,16 @@ with tab2:
                 if st.button("✅ 送出答案", use_container_width=True):
                     if user_input.strip().lower() == word.lower():
                         st.toast('答對了！進入下一個', icon='🎉')
-                        update_word(conn, word_id, level, True, mistakes)
+                        update_word(word_id, level, True, mistakes)
                         st.rerun()
                     else:
                         st.session_state.quiz_state = "show_wrong_answer"
-                        update_word(conn, word_id, level, False, mistakes)
+                        update_word(word_id, level, False, mistakes)
                         st.rerun()
             with col_b:
                 if st.button("❌ 不會拼 (看答案)", use_container_width=True):
                     st.session_state.quiz_state = "show_wrong_answer"
-                    update_word(conn, word_id, level, False, mistakes)
+                    update_word(word_id, level, False, mistakes)
                     st.rerun()
 
         elif st.session_state.quiz_state == "show_wrong_answer":
@@ -235,7 +284,7 @@ with tab2:
             if image_data:
                 col1, col2, col3 = st.columns([1, 2, 1])
                 with col2:
-                    st.image(image_data, use_container_width=True)
+                    st.image(bytes(image_data), use_container_width=True)
                     
             st.info("💡 這個單字已經重新排入今日複習計畫，今天稍後會再次出現。")
             if st.button("👉 點我繼續測驗下一個單字", use_container_width=True):
@@ -245,16 +294,7 @@ with tab2:
 # --- 標籤頁 3: 弱點分析 ---
 with tab3:
     st.header("弱點追蹤")
-    df = pd.read_sql_query('''
-        SELECT 
-            word AS 英文單字, 
-            meaning AS 中文意思, 
-            mistake_count AS 累積忘記次數,
-            last_mistake_date AS 最近卡關日期
-        FROM vocab 
-        ORDER BY mistake_count DESC, last_mistake_date DESC
-    ''', conn)
-    
+    df = get_weakness_df()
     if not df.empty:
         st.dataframe(df, use_container_width=True)
     else:
@@ -264,11 +304,11 @@ with tab3:
 with tab4:
     st.header("🗂️ 總字庫與管理")
     
-    total_words = get_total_count(conn)
+    total_words = get_total_count()
     st.info(f"📚 目前資料庫中共有 **{total_words}** 個單字")
     
     st.subheader("✏️ 編輯或刪除單字")
-    all_words_list = get_all_words(conn)
+    all_words_list = get_all_words()
     
     if all_words_list:
         word_options = {f"{w[1]} ({w[2]})": w for w in all_words_list}
@@ -294,7 +334,7 @@ with tab4:
                     elif edit_image_url.strip():
                         img_bytes_to_update = fetch_image_from_url(edit_image_url.strip())
                     
-                    if update_word_info(conn, selected_id, edit_word.strip().lower(), edit_meaning.strip(), img_bytes_to_update, clear_img_checkbox):
+                    if update_word_info(selected_id, edit_word.strip().lower(), edit_meaning.strip(), img_bytes_to_update, clear_img_checkbox):
                         st.success("修改成功！")
                         st.rerun()
                     else:
@@ -305,12 +345,12 @@ with tab4:
                 st.warning("⚠️ 刪除後無法復原。")
                 st.text_input("確認", value="勾選下方按鈕刪除", disabled=True, label_visibility="hidden")
                 if st.form_submit_button("🚨 確認永久刪除", use_container_width=True):
-                    delete_word(conn, selected_id)
+                    delete_word(selected_id)
                     st.success("刪除成功！")
                     st.rerun()
                     
     st.divider()
     st.write("📋 **所有單字預覽**")
-    df_all = pd.read_sql_query('SELECT id AS 編號, word AS 英文, meaning AS 中文, level AS 記憶階段 FROM vocab ORDER BY id DESC', conn)
+    df_all = get_all_df()
     if not df_all.empty:
         st.dataframe(df_all, use_container_width=True, hide_index=True)
