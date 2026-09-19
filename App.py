@@ -354,7 +354,7 @@ with tab2:
 
        
 
-        if st.button("👉 我記住了，前往下一題", use_container_width=True):
+        if st.button("👉 記住了嗎?，前往下一題", use_container_width=True):
 
             st.session_state.quiz_state = 'question'
 
