@@ -86,8 +86,14 @@ def get_weak_words(conn):
 
 def get_all_words(conn):
     c = conn.cursor()
-    c.execute('SELECT id, word, meaning, level, mistake_count, group_name FROM vocab ORDER BY id DESC')
-    return c.fetchall()
+    try:
+        c.execute('SELECT id, word, meaning, level, next_review_date, mistake_count, group_name FROM vocab ORDER BY id DESC')
+        rows = c.fetchall()
+        return [r if len(r) == 7 else r + ('預設群組',) for r in rows]
+    except sqlite3.OperationalError:
+        c.execute('SELECT id, word, meaning, level, next_review_date, mistake_count FROM vocab ORDER BY id DESC')
+        rows = c.fetchall()
+        return [r + ('預設群組',) for r in rows]
 
 def get_all_groups(conn):
     c = conn.cursor()
