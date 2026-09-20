@@ -21,7 +21,6 @@ def init_db():
             group_name TEXT
         )
     ''')
-    # 相容舊資料庫，若無 group_name 欄位則自動補上
     try:
         c.execute('ALTER TABLE vocab ADD COLUMN group_name TEXT')
     except sqlite3.OperationalError:
@@ -53,7 +52,6 @@ def add_batch_words(conn, raw_text, group_name):
         line = line.strip()
         if not line:
             continue
-        # 支援逗號或空格分隔 (例如: apple,蘋果 或 apple 蘋果)
         if ',' in line:
             parts = line.split(',', 1)
         else:
@@ -135,7 +133,7 @@ st.title("🧠 遺忘曲線單字記憶系統")
 
 tab1, tab2, tab3 = st.tabs(["📝 新增單字", "🎯 測驗與練習", "📊 單字庫與弱點管理"])
 
-# --- 標籤頁 1: 新增單字 (支援單字/批次與群組) ---
+# --- 標籤頁 1: 新增單字 ---
 with tab1:
     st.header("輸入新單字")
     
@@ -175,10 +173,11 @@ with tab2:
     st.header("開始練習")
     
     practice_mode = st.radio("選擇練習模式：", 
-                               ["📅 每日複習 (依計畫)", "🏋️ 強化弱點 (忘記次數>0)", "🔍 自訂單字練習"], 
-                               horizontal=True)
+                             ["📅 每日複習 (依計畫)", "🏋️ 強化弱點 (忘記次數>0)", "🔍 自訂單字練習"], 
+                             horizontal=True)
     
     words_list = []
+    custom_key_signature = ""
     
     if practice_mode == "📅 每日複習 (依計畫)":
         words_list = get_due_words(conn)
@@ -195,79 +194,74 @@ with tab2:
                 if groups:
                     selected_group = st.selectbox("選擇群組：", groups)
                     words_list = get_words_by_group(conn, selected_group)
+                    custom_key_signature = f"group_{selected_group}"
                 else:
                     st.info("目前沒有任何群組分類。")
             else:
-                # 多選單字
                 word_options = {f"{w[1]} ({w[2]}) [群組: {w[5] or '無'}]": w for w in all_words}
                 selected_keys = st.multiselect("請選擇要練習的單字（可複選）：", list(word_options.keys()))
                 words_list = [word_options[k] for k in selected_keys]
+                custom_key_signature = f"custom_{','.join(selected_keys)}"
         else:
             words_list = []
 
-    # 初始化核心狀態
+    # 初始化索引與狀態管理
     if 'quiz_state' not in st.session_state:
         st.session_state.quiz_state = 'question'
-    if 'current_test_word' not in st.session_state:
-        st.session_state.current_test_word = None 
-    if 'last_practice_mode' not in st.session_state:
-        st.session_state.last_practice_mode = practice_mode
+    if 'quiz_index' not in st.session_state:
+        st.session_state.quiz_index = 0
+    if 'last_mode_sig' not in st.session_state:
+        st.session_state.last_mode_sig = (practice_mode, custom_key_signature)
 
-    if st.session_state.last_practice_mode != practice_mode:
+    # 若切換模式或選取清單改變，重設進度
+    current_sig = (practice_mode, custom_key_signature)
+    if st.session_state.last_mode_sig != current_sig:
         st.session_state.quiz_state = 'question'
-        st.session_state.current_test_word = None
-        st.session_state.last_practice_mode = practice_mode
+        st.session_state.quiz_index = 0
+        st.session_state.last_mode_sig = current_sig
 
-    needs_new_word = False
-    if st.session_state.quiz_state == 'question':
-        if st.session_state.current_test_word is None:
-            needs_new_word = True
-        else:
-            current_id = st.session_state.current_test_word['id']
-            if not any(w[0] == current_id for w in words_list):
-                needs_new_word = True
-    
-    if needs_new_word:
-        if words_list:
-            w = words_list[0]
-            st.session_state.current_test_word = {
-                "id": w[0], "word": w[1], "meaning": w[2], 
-                "level": w[3], "mistakes": w[4], "group": w[5]
-            }
-        else:
-            st.session_state.current_test_word = None
+    idx = st.session_state.quiz_index
 
-    if st.session_state.current_test_word is None:
-        if st.session_state.quiz_state != 'wrong_feedback':
+    # 判斷是否還有題目
+    if not words_list or idx >= len(words_list):
+        if not words_list:
             st.info("太棒了！目前這個模式下沒有待測驗的單字。🎉")
+        else:
+            st.balloons()
+            st.success("🎉 太厲害了！本次練習的所有單字已經全部複習完畢！")
+            if st.button("🔄 重新再練一次", use_container_width=True):
+                st.session_state.quiz_index = 0
+                st.session_state.quiz_state = 'question'
+                st.rerun()
     else:
-        word_info = st.session_state.current_test_word
-        word_id = word_info['id']
-        word = word_info['word']
-        meaning = word_info['meaning']
-        level = word_info['level']
-        mistakes = word_info['mistakes']
-        group = word_info['group']
+        current_item = words_list[idx]
+        word_id, word, meaning, level, mistakes, group = current_item[0], current_item[1], current_item[2], current_item[3], current_item[4], current_item[5]
 
         if st.session_state.quiz_state == 'question':
-            if practice_mode != "🔍 自訂單字練習":
-                st.write(f"待複習數量：**{len(words_list)}**")
-            elif group:
-                st.caption(f"目前群組：{group}")
+            # 顯示進度與群組資訊
+            col_info1, col_info2 = st.columns(2)
+            with col_info1:
+                st.write(f"進度：**{idx + 1} / {len(words_list)}**")
+            with col_info2:
+                if group:
+                    st.caption(f"群組：{group}")
             
             st.markdown(f"<h3 style='text-align: center; color: #555;'>「{meaning}」的正確英文是：</h3>", unsafe_allow_html=True)
             
-            user_answer = st.text_input("請輸入英文單字：", key=f"input_{word_id}")
+            user_answer = st.text_input("請輸入英文單字：", key=f"input_{word_id}_{idx}")
             
             col1, col2 = st.columns(2)
             with col1:
                 if st.button("送出答案", use_container_width=True):
                     if user_answer.strip().lower() == word.lower():
                         update_word(conn, word_id, level, True, mistakes)
-                        st.session_state.current_test_word = None 
+                        # 答對：直接跳下一題
+                        st.session_state.quiz_index += 1
+                        st.session_state.quiz_state = 'question'
                         st.rerun()
                     else:
                         update_word(conn, word_id, level, False, mistakes)
+                        # 答錯：進入提示畫面
                         st.session_state.quiz_state = 'wrong_feedback'
                         st.rerun()
             with col2:
@@ -283,11 +277,11 @@ with tab2:
             st.markdown(f"<h2 style='text-align: center; color: #FF4B4B; font-size: 4rem; font-weight: bold;'>{word}</h2>", unsafe_allow_html=True)
             
             if st.button("👉 我記住了，前往下一題", use_container_width=True):
+                st.session_state.quiz_index += 1
                 st.session_state.quiz_state = 'question'
-                st.session_state.current_test_word = None 
                 st.rerun()
 
-# --- 標籤頁 3: 單字庫與弱點管理 (含查詢與刪除) ---
+# --- 標籤頁 3: 單字庫與弱點管理 ---
 with tab3:
     st.header("📚 單字庫管理與弱點分析")
     
@@ -295,7 +289,6 @@ with tab3:
     if all_data:
         df = pd.DataFrame(all_data, columns=["ID", "英文單字", "中文意思", "記憶級別", "下次複習日", "忘記次數", "群組名稱"])
         
-        # 搜尋與篩選工具
         col_s1, col_s2 = st.columns(2)
         with col_s1:
             search_query = st.text_input("🔍 搜尋單字或意思：", "").strip().lower()
@@ -324,7 +317,7 @@ with tab3:
             if st.button("確定刪除此單字", type="primary"):
                 target_id = delete_options[selected_to_delete]
                 delete_word_by_id(conn, target_id)
-                st.success(f"已成功刪除單字！")
+                st.success("已成功刪除單字！")
                 st.rerun()
         else:
             st.info("目前沒有符合條件的單字可供刪除。")
