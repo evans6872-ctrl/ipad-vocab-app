@@ -15,9 +15,9 @@ def init_db():
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             word TEXT UNIQUE,
             meaning TEXT,
-            level INTEGER,
+            level INTEGER DEFAULT 0,
             next_review_date DATE,
-            mistake_count INTEGER,
+            mistake_count INTEGER DEFAULT 0,
             group_name TEXT
         )
     ''')
@@ -110,6 +110,10 @@ def delete_word_by_id(conn, word_id):
     conn.commit()
 
 def update_word(conn, word_id, level, remembered, mistake_count):
+    # 防止 level 或 mistake_count 為 None
+    level = int(level) if level is not None else 0
+    mistake_count = int(mistake_count) if mistake_count is not None else 0
+
     c = conn.cursor()
     if remembered:
         new_level = min(level + 1, len(INTERVALS) - 1)
@@ -198,14 +202,18 @@ with tab2:
                 else:
                     st.info("目前沒有任何群組分類。")
             else:
-                word_options = {f"{w[1]} ({w[2]}) [群組: {w[5] or '無'}]": w for w in all_words}
-                selected_keys = st.multiselect("請選擇要練習的單字（可複選）：", list(word_options.keys()))
+                # 收合選單：避免作答時直接看到英文單字劇透
+                with st.expander("點此展開/收合勾選單字清單", expanded=False):
+                    # 選項僅顯示中文意思與群組，不直接露出英文單字答案
+                    word_options = {f"中文：{w[2]} [群組: {w[5] or '無'}] (ID:{w[0]})": w for w in all_words}
+                    selected_keys = st.multiselect("請選擇要練習的中文意思（可複選）：", list(word_options.keys()))
+                
                 words_list = [word_options[k] for k in selected_keys]
                 custom_key_signature = f"custom_{','.join(selected_keys)}"
         else:
             words_list = []
 
-    # 初始化索引與狀態管理
+    # 初始化狀態
     if 'quiz_state' not in st.session_state:
         st.session_state.quiz_state = 'question'
     if 'quiz_index' not in st.session_state:
@@ -213,7 +221,7 @@ with tab2:
     if 'last_mode_sig' not in st.session_state:
         st.session_state.last_mode_sig = (practice_mode, custom_key_signature)
 
-    # 若切換模式或選取清單改變，重設進度
+    # 切換條件時重設題號
     current_sig = (practice_mode, custom_key_signature)
     if st.session_state.last_mode_sig != current_sig:
         st.session_state.quiz_state = 'question'
@@ -222,10 +230,10 @@ with tab2:
 
     idx = st.session_state.quiz_index
 
-    # 判斷是否還有題目
+    # 判斷是否還有待測單字
     if not words_list or idx >= len(words_list):
         if not words_list:
-            st.info("太棒了！目前這個模式下沒有待測驗的單字。🎉")
+            st.info("太棒了！目前這個模式下沒有待測驗的單字（若為自由勾選請先展開上方選單勾選單字）。🎉")
         else:
             st.balloons()
             st.success("🎉 太厲害了！本次練習的所有單字已經全部複習完畢！")
@@ -235,10 +243,14 @@ with tab2:
                 st.rerun()
     else:
         current_item = words_list[idx]
-        word_id, word, meaning, level, mistakes, group = current_item[0], current_item[1], current_item[2], current_item[3], current_item[4], current_item[5]
+        word_id = current_item[0]
+        word = str(current_item[1])
+        meaning = current_item[2]
+        level = int(current_item[3]) if current_item[3] is not None else 0
+        mistakes = int(current_item[4]) if current_item[4] is not None else 0
+        group = current_item[5]
 
         if st.session_state.quiz_state == 'question':
-            # 顯示進度與群組資訊
             col_info1, col_info2 = st.columns(2)
             with col_info1:
                 st.write(f"進度：**{idx + 1} / {len(words_list)}**")
@@ -248,27 +260,30 @@ with tab2:
             
             st.markdown(f"<h3 style='text-align: center; color: #555;'>「{meaning}」的正確英文是：</h3>", unsafe_allow_html=True)
             
-            user_answer = st.text_input("請輸入英文單字：", key=f"input_{word_id}_{idx}")
-            
-            col1, col2 = st.columns(2)
-            with col1:
-                if st.button("送出答案", use_container_width=True):
-                    if user_answer.strip().lower() == word.lower():
-                        update_word(conn, word_id, level, True, mistakes)
-                        # 答對：直接跳下一題
-                        st.session_state.quiz_index += 1
-                        st.session_state.quiz_state = 'question'
-                        st.rerun()
-                    else:
-                        update_word(conn, word_id, level, False, mistakes)
-                        # 答錯：進入提示畫面
-                        st.session_state.quiz_state = 'wrong_feedback'
-                        st.rerun()
-            with col2:
-                if st.button("不會，直接看答案", use_container_width=True):
+            # 使用 form 支援鍵盤 Enter 鍵直接送出答案
+            with st.form(key=f"quiz_form_{word_id}_{idx}"):
+                user_answer = st.text_input("請輸入英文單字：", value="")
+                submit_col1, submit_col2 = st.columns(2)
+                with submit_col1:
+                    submitted = st.form_submit_button("送出答案", use_container_width=True)
+                with submit_col2:
+                    give_up = st.form_submit_button("不會，直接看答案", use_container_width=True)
+
+            if submitted:
+                if user_answer.strip().lower() == word.strip().lower():
+                    update_word(conn, word_id, level, True, mistakes)
+                    st.session_state.quiz_index += 1
+                    st.session_state.quiz_state = 'question'
+                    st.rerun()
+                else:
                     update_word(conn, word_id, level, False, mistakes)
                     st.session_state.quiz_state = 'wrong_feedback'
                     st.rerun()
+
+            if give_up:
+                update_word(conn, word_id, level, False, mistakes)
+                st.session_state.quiz_state = 'wrong_feedback'
+                st.rerun()
 
         elif st.session_state.quiz_state == 'wrong_feedback':
             st.error("❌ 拼錯了或是忘記囉！請看正確答案並加深記憶：")
