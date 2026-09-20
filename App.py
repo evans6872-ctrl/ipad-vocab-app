@@ -74,24 +74,27 @@ def add_batch_words(conn, raw_text, group_name):
 def get_due_words(conn):
     c = conn.cursor()
     today = datetime.now().date()
+    # 統一回傳格式：id, word, meaning, level, mistake_count, group_name
     c.execute('SELECT id, word, meaning, level, mistake_count, group_name FROM vocab WHERE next_review_date <= ?', (today,))
     return c.fetchall()
 
 def get_weak_words(conn):
     c = conn.cursor()
+    # 統一回傳格式：id, word, meaning, level, mistake_count, group_name
     c.execute('SELECT id, word, meaning, level, mistake_count, group_name FROM vocab WHERE mistake_count > 0 ORDER BY mistake_count DESC')
     return c.fetchall()
 
 def get_all_words(conn):
     c = conn.cursor()
+    # 統一回傳格式：id, word, meaning, level, mistake_count, group_name, next_review_date
     try:
-        c.execute('SELECT id, word, meaning, level, next_review_date, mistake_count, group_name FROM vocab ORDER BY id DESC')
+        c.execute('SELECT id, word, meaning, level, mistake_count, group_name, next_review_date FROM vocab ORDER BY id DESC')
         rows = c.fetchall()
-        return [r if len(r) == 7 else r + ('預設群組',) for r in rows]
+        return [r if len(r) == 7 else (r[0], r[1], r[2], r[3], r[4], '預設群組', r[5]) for r in rows]
     except sqlite3.OperationalError:
-        c.execute('SELECT id, word, meaning, level, next_review_date, mistake_count FROM vocab ORDER BY id DESC')
+        c.execute('SELECT id, word, meaning, level, mistake_count, next_review_date FROM vocab ORDER BY id DESC')
         rows = c.fetchall()
-        return [r + ('預設群組',) for r in rows]
+        return [(r[0], r[1], r[2], r[3], r[4], '預設群組', r[5]) for r in rows]
 
 def get_all_groups(conn):
     c = conn.cursor()
@@ -101,6 +104,7 @@ def get_all_groups(conn):
 
 def get_words_by_group(conn, group_name):
     c = conn.cursor()
+    # 統一回傳格式：id, word, meaning, level, mistake_count, group_name
     c.execute('SELECT id, word, meaning, level, mistake_count, group_name FROM vocab WHERE group_name = ?', (group_name,))
     return c.fetchall()
 
@@ -110,9 +114,15 @@ def delete_word_by_id(conn, word_id):
     conn.commit()
 
 def update_word(conn, word_id, level, remembered, mistake_count):
-    # 防止 level 或 mistake_count 為 None
-    level = int(level) if level is not None else 0
-    mistake_count = int(mistake_count) if mistake_count is not None else 0
+    try:
+        level = int(level)
+    except (ValueError, TypeError):
+        level = 0
+
+    try:
+        mistake_count = int(mistake_count)
+    except (ValueError, TypeError):
+        mistake_count = 0
 
     c = conn.cursor()
     if remembered:
@@ -202,18 +212,21 @@ with tab2:
                 else:
                     st.info("目前沒有任何群組分類。")
             else:
-                # 收合選單：避免作答時直接看到英文單字劇透
                 with st.expander("點此展開/收合勾選單字清單", expanded=False):
-                    # 選項僅顯示中文意思與群組，不直接露出英文單字答案
-                    word_options = {f"中文：{w[2]} [群組: {w[5] or '無'}] (ID:{w[0]})": w for w in all_words}
-                    selected_keys = st.multiselect("請選擇要練習的中文意思（可複選）：", list(word_options.keys()))
-                
-                words_list = [word_options[k] for k in selected_keys]
-                custom_key_signature = f"custom_{','.join(selected_keys)}"
+                    # 格式：(id, word, meaning, level, mistake_count, group_name, next_review_date)
+                    word_dict = {w[0]: w for w in all_words}
+                    selected_ids = st.multiselect(
+                        "請勾選欲測驗的中文意思：",
+                        options=list(word_dict.keys()),
+                        format_func=lambda x: f"「{word_dict[x][2]}」 [群組: {word_dict[x][5] or '無'}]"
+                    )
+                # 統一轉成與其它模式一致的 6 個欄位：id, word, meaning, level, mistake_count, group_name
+                words_list = [(w[0], w[1], w[2], w[3], w[4], w[5]) for w in [word_dict[i] for i in selected_ids]]
+                custom_key_signature = f"custom_{','.join(map(str, selected_ids))}"
         else:
             words_list = []
 
-    # 初始化狀態
+    # 初始化進度
     if 'quiz_state' not in st.session_state:
         st.session_state.quiz_state = 'question'
     if 'quiz_index' not in st.session_state:
@@ -221,7 +234,7 @@ with tab2:
     if 'last_mode_sig' not in st.session_state:
         st.session_state.last_mode_sig = (practice_mode, custom_key_signature)
 
-    # 切換條件時重設題號
+    # 模式或題庫切換時重設題號
     current_sig = (practice_mode, custom_key_signature)
     if st.session_state.last_mode_sig != current_sig:
         st.session_state.quiz_state = 'question'
@@ -230,10 +243,10 @@ with tab2:
 
     idx = st.session_state.quiz_index
 
-    # 判斷是否還有待測單字
+    # 判斷是否還有題目
     if not words_list or idx >= len(words_list):
         if not words_list:
-            st.info("太棒了！目前這個模式下沒有待測驗的單字（若為自由勾選請先展開上方選單勾選單字）。🎉")
+            st.info("目前這個模式下沒有待測驗的單字（若為自由勾選請先點開上方選單選取單字）。🎉")
         else:
             st.balloons()
             st.success("🎉 太厲害了！本次練習的所有單字已經全部複習完畢！")
@@ -246,8 +259,18 @@ with tab2:
         word_id = current_item[0]
         word = str(current_item[1])
         meaning = current_item[2]
-        level = int(current_item[3]) if current_item[3] is not None else 0
-        mistakes = int(current_item[4]) if current_item[4] is not None else 0
+        
+        # 安全轉型，預防 None 或錯誤型態
+        try:
+            level = int(current_item[3])
+        except (ValueError, TypeError):
+            level = 0
+            
+        try:
+            mistakes = int(current_item[4])
+        except (ValueError, TypeError):
+            mistakes = 0
+            
         group = current_item[5]
 
         if st.session_state.quiz_state == 'question':
@@ -260,7 +283,6 @@ with tab2:
             
             st.markdown(f"<h3 style='text-align: center; color: #555;'>「{meaning}」的正確英文是：</h3>", unsafe_allow_html=True)
             
-            # 使用 form 支援鍵盤 Enter 鍵直接送出答案
             with st.form(key=f"quiz_form_{word_id}_{idx}"):
                 user_answer = st.text_input("請輸入英文單字：", value="")
                 submit_col1, submit_col2 = st.columns(2)
@@ -302,7 +324,7 @@ with tab3:
     
     all_data = get_all_words(conn)
     if all_data:
-        df = pd.DataFrame(all_data, columns=["ID", "英文單字", "中文意思", "記憶級別", "下次複習日", "忘記次數", "群組名稱"])
+        df = pd.DataFrame(all_data, columns=["ID", "英文單字", "中文意思", "記憶級別", "忘記次數", "群組名稱", "下次複習日"])
         
         col_s1, col_s2 = st.columns(2)
         with col_s1:
@@ -325,7 +347,7 @@ with tab3:
         
         st.markdown("---")
         st.subheader("🗑️ 刪除單字管理")
-        delete_options = {f"{row[1]} ({row[2]}) [群組: {row[6] or '無'}] (ID: {row[0]})": row[0] for row in filtered_df.itertuples(index=False)}
+        delete_options = {f"{row[1]} ({row[2]}) [群組: {row[5] or '無'}] (ID: {row[0]})": row[0] for row in filtered_df.itertuples(index=False)}
         
         if delete_options:
             selected_to_delete = st.selectbox("選擇要刪除的單字：", list(delete_options.keys()))
